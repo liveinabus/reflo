@@ -1,0 +1,25 @@
+# Dependencies and local build output
+node_modules/
+.expo/
+dist/
+web-build/
+*.apk
+*.aab
+
+# Local configuration and signing credentials
+/.codex/
+.env
+.env.*
+!.env.example
+credentials.json
+*.jks
+*.keystore
+*.p12
+*.pem
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+
+# Bootstrap archive (source files are tracked separately)
+/Reflo-Android-Setup.zip
