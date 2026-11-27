@@ -1,8 +1,9 @@
-import { Camera, Map, Marker, type CameraRef, type LngLat } from '@maplibre/maplibre-react-native';
+import { Camera, Map, Marker, ViewAnnotation, type CameraRef, type LngLat } from '@maplibre/maplibre-react-native';
+import * as Location from 'expo-location';
 import { type SQLiteDatabase } from 'expo-sqlite';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { HouseEditor } from './src/HouseEditor';
 import { listHouses, openHouseDatabase, saveHouse, type House, type HouseDetails } from './src/houses';
@@ -24,6 +25,11 @@ function Reflo({ db, houses: savedHouses }: Project) {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [adding, setAdding] = useState(false);
   const [basemapUnavailable, setBasemapUnavailable] = useState(false);
+  const [position, setPosition] = useState<LngLat | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [locationMessage, setLocationMessage] = useState('');
+  const [offerSettings, setOfferSettings] = useState(false);
+  const locationPending = useRef(false);
   const camera = useRef<CameraRef>(null);
   const [initialView] = useState(() => {
     const house = savedHouses[0];
@@ -61,6 +67,48 @@ function Reflo({ db, houses: savedHouses }: Project) {
     );
   }
 
+  async function findMyLocation() {
+    if (locationPending.current) return;
+    locationPending.current = true;
+    setLocating(true);
+    setPosition(null);
+    setLocationMessage('');
+    setOfferSettings(false);
+
+    try {
+      let permission = await Location.getForegroundPermissionsAsync();
+      if (!permission.granted && permission.canAskAgain) {
+        permission = await Location.requestForegroundPermissionsAsync();
+      }
+      if (!permission.granted) {
+        setOfferSettings(!permission.canAskAgain);
+        setLocationMessage(permission.canAskAgain
+          ? 'Location permission denied. Tap My location to try again.'
+          : 'Allow location access in app settings, then try again.');
+        return;
+      }
+      if (!await Location.hasServicesEnabledAsync()) {
+        setLocationMessage('Location services are off. Turn on Location in Android settings, then try again.');
+        return;
+      }
+
+      const approximate = permission.android?.accuracy === 'coarse';
+      const { coords } = await Location.getCurrentPositionAsync({
+        accuracy: approximate ? Location.Accuracy.Balanced : Location.Accuracy.High,
+        mayShowUserSettingsDialog: false,
+      });
+      const coordinate: LngLat = [coords.longitude, coords.latitude];
+      setPosition(coordinate);
+      setLocationMessage(approximate ? 'Approximate location' : '');
+      camera.current?.easeTo({ center: coordinate, zoom: approximate ? 12 : 15, duration: 400 });
+    } catch {
+      setLocationMessage('Could not get a location. Try again when you have a clearer view of the sky.');
+    } finally {
+      locationPending.current = false;
+      setLocating(false);
+    }
+  }
+
   return (
     <>
       <View style={styles.header}>
@@ -82,6 +130,13 @@ function Reflo({ db, houses: savedHouses }: Project) {
           }}
         >
           <Camera ref={camera} initialViewState={initialView} />
+          {position ? (
+            <ViewAnnotation id="current-location" lngLat={position}>
+              <View pointerEvents="none" style={styles.locationMarker}>
+                <View style={styles.locationDot} />
+              </View>
+            </ViewAnnotation>
+          ) : null}
           {houses.map((house) => (
             <Marker
               key={house.id}
@@ -100,10 +155,34 @@ function Reflo({ db, houses: savedHouses }: Project) {
           </Pressable>
         ) : null}
         <View style={styles.mapActions}>
+          {locationMessage ? (
+            <View style={styles.locationNotice}>
+              <Text accessibilityLiveRegion="polite" style={styles.actionText}>{locationMessage}</Text>
+              {offerSettings ? (
+                <Pressable accessibilityRole="button" style={styles.settings} onPress={() => {
+                  void Linking.openSettings().catch(() => {
+                    setLocationMessage('Open Reflo’s app settings manually to allow location access.');
+                  });
+                }}>
+                  <Text style={styles.actionText}>Open app settings</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
           {adding ? <Text style={styles.hint}>Tap the map to place a house.</Text> : null}
-          <Pressable accessibilityRole="button" style={styles.primary} onPress={() => setAdding(!adding)}>
-            <Text style={styles.primaryText}>{adding ? 'Cancel' : '+ Drop a pin'}</Text>
-          </Pressable>
+          <View style={styles.mapButtons}>
+            <Pressable accessibilityRole="button" style={styles.primary} onPress={() => setAdding(!adding)}>
+              <Text style={styles.primaryText}>{adding ? 'Cancel' : '+ Drop a pin'}</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="My location"
+              accessibilityState={{ disabled: locating, busy: locating }} disabled={locating}
+              style={styles.locationButton} onPress={findMyLocation}>
+              {locating ? <ActivityIndicator size="small" color="#164c8d" /> : null}
+              <Text accessibilityLiveRegion="polite" style={styles.actionText}>
+                {locating ? 'Finding location…' : 'My location'}
+              </Text>
+            </Pressable>
+          </View>
         </View>
       </View>
       <View style={styles.listPanel}>
@@ -195,6 +274,12 @@ const styles = StyleSheet.create({
   mapPanel: { flex: 3, backgroundColor: '#dce5dc' },
   notice: { position: 'absolute', top: 44, alignSelf: 'center', padding: 10, backgroundColor: '#fff', borderRadius: 8 },
   mapActions: { position: 'absolute', left: 14, bottom: 18, alignItems: 'flex-start', gap: 6 },
+  mapButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  locationButton: { flexDirection: 'row', alignItems: 'center', gap: 6, padding: 12, borderRadius: 12, backgroundColor: '#fff' },
+  locationNotice: { maxWidth: 260, padding: 10, borderRadius: 8, backgroundColor: '#fff' },
+  settings: { alignSelf: 'flex-start', paddingVertical: 10 },
+  locationMarker: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#255fc655', alignItems: 'center', justifyContent: 'center' },
+  locationDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#fff', backgroundColor: '#164c8d' },
   hint: { padding: 9, borderRadius: 8, color: '#17392d', backgroundColor: '#fff' },
   primary: { backgroundColor: '#1b543e', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16 },
   primaryText: { color: '#fff', fontSize: 15, fontWeight: '700' },
